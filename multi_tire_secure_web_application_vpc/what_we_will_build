@@ -1,0 +1,23 @@
+1. Problem Statement
+A SaaS company needs a secure, scalable web platform where frontend, backend, and database are fully isolated.
+
+
+2. Architecture Overview
+- Public Subnet: ALB (Application Load Balancer)
+- Private App Subnet: EC2 Auto Scaling Group (backend APIs)
+- Private DB Subnet: RDS (Multi-AZ)
+- NAT Gateway for outbound traffic
+- VPC with 3-tier segmentation
+
+3. AWS Services
+EC2, VPC, ALB, RDS, Auto Scaling, NAT Gateway, IAM, CloudWatch, KMS
+
+4. Key Features
+- Strict subnet isolation (zero direct DB access)
+- Auto Scaling for traffic spikes
+- Multi-AZ RDS failover
+- IAM role-based EC2 access
+- Encrypted DB using KMS
+- Centralized logs via CloudWatch
+
+

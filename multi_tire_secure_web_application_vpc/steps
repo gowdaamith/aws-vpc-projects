@@ -1,0 +1,276 @@
+Phase 1: The Networking Foundation
+
+Step 1:  Create the VPC (The Outer Boundary)
+
+Log into the AWS Management Console and search for VPC.
+Click Your VPCs in the left sidebar, then click the orange Create VPC button.
+Crucial Step: Under "Resources to create", select VPC only. (Using the "VPC and more" wizard auto-generates everything, which skips the actual engineering).
+Name tag: Production-SaaS-VPC
+IPv4 CIDR block: 10.0.0.0/16
+Leave IPv6 disabled and Tenancy as Default.
+Click Create VPC.
+
+
+Step 2: Create the Subnets ( the 3-tier segmentation)
+Now we slice that massive /16 network (65,000+ IPs) into smaller, isolated /24 chunks (256 IPs each).
+
+In the left sidebar of the VPC Dashboard, click Subnets, then click Create subnet.
+In the dropdown, select the Production-SaaS-VPC you just created.
+You will add 6 subnets in total. Click Add new subnet until you have 6 configuration blocks on your screen.
+
+
+Use this exact configuration. Make sure to alternate the Availability Zones (AZs) so your infrastructure can survive a data center outage. (Note: If you aren't in the N. Virginia region, just substitute us-east-1a and 1b with the a and b zones of your current region).
+
+
+Subnet 1: Name: Public-Subnet-1 | AZ: us-east-1a | IPv4 CIDR: 10.0.1.0/24
+
+Subnet 2: Name: Public-Subnet-2 | AZ: us-east-1b | IPv4 CIDR: 10.0.2.0/24
+
+Subnet 3: Name: Private-App-1 | AZ: us-east-1a | IPv4 CIDR: 10.0.11.0/24
+
+Subnet 4: Name: Private-App-2 | AZ: us-east-1b | IPv4 CIDR: 10.0.12.0/24
+
+Subnet 5: Name: Private-Data-1 | AZ: us-east-1a | IPv4 CIDR: 10.0.21.0/24
+
+Subnet 6: Name: Private-Data-2 | AZ: us-east-1b | IPv4 CIDR: 10.0.22.0/24
+
+
+Once all the 6 are configured .click create subnets 
+
+Take a look at the "Available IPv4 addresses" column. Even though a /24 CIDR mathematically provides 256 IPs, AWS will show 251. AWS automatically reserves the first 4 IPs and the last 1 IP in every subnet for internal routing, DNS, and broadcast.
+
+
+Phase 2: Traffic Routing & Gateways
+
+Step 3: Create and Attach the Internet Gateway (IGW)
+The IGW is the "front door" of your VPC.
+
+On the left sidebar, click Internet Gateways, then click Create internet gateway.
+Name tag: Prod-IGW
+Click Create internet gateway.
+You will see a green success banner, but notice its state is "Detached".
+Click the Actions dropdown in the top right and select Attach to VPC.
+Select your Production-SaaS-VPC from the dropdown and click Attach internet gateway.
+
+
+Step 4: Create the NAT Gateway (The Secure Exit)
+
+Your private app servers need internet access to download packages or communicate with third-party APIs, but they cannot have public IP addresses. The NAT Gateway allows outbound traffic while blocking inbound connections
+
+On the left sidebar, click NAT Gateways, then click Create NAT gateway.
+Name: Prod-NAT-GW
+Subnet: Select Public-Subnet-1. (Senior check: A NAT Gateway must always live in a Public subnet so it can route to the IGW).
+Connectivity type: Public
+Elastic IP allocation ID: Click the Allocate Elastic IP button. This gives the NAT Gateway a static public IP.
+Click Create NAT gateway.
+
+Step 5: Configure the Route Tables (The Traffic Cops)
+
+This is the most critical step for security. By default, AWS created one Main Route Table for your VPC, but we are going to create three custom ones to strictly enforce our 3-tier architecture.
+
+A. The Public Route Table
+
+On the left sidebar, click Route Tables, then Create route table.
+Name: RT-Public | VPC: Select Production-SaaS-VPC -> Click Create.
+With RT-Public selected, look at the bottom half of the screen and click the Routes tab, then Edit routes.
+Click Add route.
+  Destination: 0.0.0.0/0 (This means "anywhere on the internet")
+  Target: Select Internet Gateway, then click your Prod-IGW.
+Click Save changes.
+
+Click the Subnet associations tab, then Edit subnet associations.
+Check the boxes next to ONLY Public-Subnet-1 and Public-Subnet-2. Click Save.
+
+
+B. The Private App Route Table
+
+Create another Route Table named RT-Private-App in your VPC.
+Go to the Routes tab -> Edit routes -> Add route.
+   Destination: 0.0.0.0/0
+   Target: Select NAT Gateway, then click your Prod-NAT-GW.
+Click on Save changes
+
+Go to the Subnet associations tab -> Edit subnet associations.
+Check the boxes next to Private-App-1 and Private-App-2. Click Save.
+
+
+
+C. The Private Data Route Table (The Vault)
+
+Create a third Route Table named RT-Private-Data in your VPC.
+Crucial: Do NOT add a 0.0.0.0/0 route here. Leave it exactly as it is (it should only have the local 10.0.0.0/16 route). This guarantees your databases are air-gapped from the internet.Go to the Subnet associations tab -> Edit subnet associations.
+Check the boxes next to Private-Data-1 and Private-Data-2. Click Save.
+
+
+
+Now Go to your Tabels dashboard and filter by your vpc .you should see 4 route tables  1 deffault and 3 customm 
+
+RT-Public points to an igw-
+
+RT-Private-App points to a nat-
+
+RT-Private-Data only has a local route.
+
+
+
+Phase 3 : The security Layer 
+
+Step 6: Create Security Groups ( The statefull firewalls)
+
+Go to the VPC dashboard ,scroll down the left sidebar to security and click Security groups ,click create security group
+
+1. The Load Balancer Security Group (SG-ALB)
+This is the only resource that speaks to the public internet.
+
+Name: SG-ALB
+Description: Allow public HTTP/HTTPS traffic to the load balancer
+VPC: Production-SaaS-VPC
+Inbound Rules:
+  Type: HTTP | Source: Anywhere-IPv4 (0.0.0.0/0)
+  Type: HTTPS | Source: Anywhere-IPv4 (0.0.0.0/0) 
+Outbound Rules: Leave default (Allow all)
+
+Click Create security group.
+
+2. The Application Security Group (SG-App-Servers)
+This will be attached to your EC2 backend servers. Notice we are not opening Port 22 for SSH.
+
+Name: SG-App-Servers
+Description: Allow traffic only from the ALB
+VPC: Production-SaaS-VPC
+Inbound Rules:
+  Type: Custom TCP | Port range: 8080 (or whichever port your CloudBite API runs on, e.g., 80 or 3000) | Source: Click the search box and select the SG-ALB you just created.
+
+  (By referencing the ALB's Security Group, it doesn't matter what IP the ALB uses. The firewall dynamically trusts it.)
+
+Outbound Rules: Leave default (Allow all)
+
+Click Create security group.
+
+
+3. The Database Security Group (SG-Database)
+This protects the RDS instance. It only trusts the App Servers.
+
+Name: SG-Database
+Description: Allow MySQL traffic only from App Servers
+VPC: Production-SaaS-VPC
+Inbound Rules:
+  Type: MySQL/Aurora (Port 3306) | Source: Click the search box and select SG-App-Servers.
+  Outbound Rules: Leave default (Allow all)
+
+Click Create security group.
+
+Step 7: NACL's ( The stateless blast radius Limiter)
+
+Security Groups protect the instances, but Network Access Control Lists (NACLs) protect the subnets. AWS creates a default NACL that allows everything. Let's harden the Data Tier.
+
+If someone accidentally modifies the SG-Database to allow public access, a strict NACL will act as a safety net and block the traffic at the subnet boundary anyway.
+
+
+- On the left sidebar, under Security, click Network ACLs.
+- Click Create network ACL.
+    Name: NACL-Data-Tier
+    VPC: Production-SaaS-VPC -> Click Create.
+- Select NACL-Data-Tier and go to the Subnet associations tab -> Edit subnet associations.
+- Check the boxes for Private-Data-1 and Private-Data-2. Click Save changes
+- Go to the Inbound rules tab -> Edit inbound rules. Add these exact rules:
+   - Rule # 100 | Type: MySQL/Aurora (3306) | Source: 10.0.11.0/24 (Private-App-1 CIDR) | Allow
+   - Rule # 110 | Type: MySQL/Aurora (3306) | Source: 10.0.12.0/24 (Private-App-2 CIDR) | Allow
+   - (Note: There is an implicit DENY for everything else).
+
+Go to the Outbound rules tab -> Edit outbound rules. Because NACLs are stateless, we must explicitly allow return traffic on ephemeral ports.
+
+   - Rule # 100 | Type: Custom TCP | Port Range: 1024-65535 | Destination: 10.0.11.0/24 | Allow
+
+   - Rule # 110 | Type: Custom TCP | Port Range: 1024-65535 | Destination: 10.0.12.0/24 | Allow
+
+Now you should have  :
+SG-ALB open to the world
+SG-App-Servers open only to SG-ALB
+SG-Database open only to SG-App-Servers
+
+This setup guarantee that even if a bad actor finds the internal IP of your database ,they cannot  reach it unless they are actively sitting on one of your application  servers 
+
+
+
+Phase 4: Launching the infrastructure
+
+Step 8:The data tier (RDS Multi-AZ)
+
+Before creating the database , we must tell RDS exactly which subnet it is allowed to use 
+
+A.Create the DB subnet group 
+- Open the RDS Dashboard, look at the left sidebar, and click Subnet groups.- Click Create DB subnet group.
+- Name: cloudbite-data-subnet-group
+- VPC: Select your Production-SaaS-VPC.
+- Under "Add subnets", choose the two Availability Zones you used (us-east-1a and us-east-1b).
+- In the subnets dropdown, select ONLY the CIDR blocks for your Data Tier (10.0.21.0/24 and 10.0.22.0/24).
+- Click Create.
+
+B.Launch the database
+- Go to Databases (left sidebar) -> Create database.
+- hoose Standard create and select MySQL.
+- Under Templates, choose Dev/Test (This allows us to enable Multi-AZ without the massive cost of a full Production template, though Production is what you'd use for a real company).
+- Settings: Name it cloudbite-db. Set a master username and password (write these down).
+- Instance configuration: Select a Burstable class (e.g., db.t3.micro) to keep costs low.
+- Connectivity: * VPC: Production-SaaS-VPC.
+  * DB Subnet group: Select the one you just created.
+  * Public access: No (Critical!).
+  * VPC security group: Choose Choose existing, then select SG-Database. Remove the default one.
+Scroll to the bottom and click Create database. (This will take 10-15 minutes, so let's build the App Tier while it provisions).
+
+
+Step 9: Compute Identity 
+
+Senior engineers don't pass around .pem files. We use AWS system Manager (SSM) for sesssion access 
+
+1.Open a new tab and go to the IAM Dashboard.
+2.Click Roles (left sidebar) -> Create role.
+3.Trusted entity type: AWS service. Use case: EC2. and speicfy what the ec2 is doing ,Click Next.
+4.In the permissions search box, type AmazonSSMManagedInstanceCore. Check the box next to it. Click Next.
+5.Role name: AppServerSSMRole. Click Create role.
+
+Step 10: The compute Tier(launch tempalte and autoscaling group)
+
+We will use an Autoscaling group so your instance can self heal and scale 
+
+A.Createa a Launch Template 
+Go to the EC2 Dashboard -> Launch Templates -> Create launch template
+Name - App-LT
+AMI - ubuntu-jammy-22.04-amd64-server
+Instance-type - t2.micro
+Key-pair - Select Proceed without a key pair (Not recommended). (We are ignoring AWS's warning here because we are securely using the SSM IAM role instead).
+Network Settings : Do not select a subnet here. For Security groups, select SG-App-Servers.
+Expand Advanced details:
+- IAM instance profile: Select the AppServerSSMRole you just created.
+- User-data : Paste the following bash script. This installs a basic web server so our Load Balancer has something to ping for health checks before you deploy your actual application code
+
+#!/bin/bash
+yum update -y
+yum install -y httpd
+systemctl start httpd
+systemctl enable httpd
+echo "<h1>CloudBite API - Backend Instance $(hostname -f)</h1>" > /var/www/html/index.html
+
+Click Create Lauch template 
+
+B.Create the AutoScaling Group and LoadBalancer
+1.Go to Auto Scaling Groups (bottom of the EC2 left sidebar) -> Create Auto Scaling group.
+2.Name it : App-ASG and Select the App-LT as the template . Click Next
+3.Network : Select your production-SaaS-VPC .For subnets ,choose only PRIVATE-APP-1 AND PRIVATE-APP-2 .Click Next
+4.Load Balancing : Select Attach to a new load Balancer
+  * Load balancer type : Application load balancer
+  * Load balancer scheme : Internet facing 
+  * Network mapping : It needs to live in the public subnet to face the internet .Select Public subnet 1 and public subnet 2 
+  *Listeners and routing : port 80 .Default routing Create a target group named APP-TG
+5.Click next until you reach group size and scaling .Set Desired : 2 ,min:2 and max: 4
+6.Skip ton review and click create autoscaling group 
+
+
+Your infrastructure is now booting up. Here is what is happening behind the scenes:
+
+The ASG is launching two EC2 instances into your private app subnets.
+
+The user data script is installing Apache on them via the NAT Gateway. [the instances and the nat gateway is connected throught the route we configured like if any instances inthe subnet what to reach the internet like 0.0.0.0/0 then keep the target as NAT gateway ]
+
+The Application Load Balancer (in the public subnets) is starting to send health checks to them.[ the application laodbalancer is not doing the health check throught the nat gateaway or the IGW its sending the requests directly to the instances throught the private ip .the instance allow this request becauese the security grooup allows it ]
