@@ -1,0 +1,119 @@
+resource "aws_security_group" "alb" {
+  name = "${var.project_name}-sg-alb"
+  description ="Allow inbound traffic"
+  vpc_id = aws_vpc.main.id
+  
+  ingress  {
+    from_port = 80
+    to_port = 80
+    protocol ="tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port = 0
+    to_port = 0
+    protocol = -1
+    cidr_blocks= ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "app"{
+  name = "${var.project_name}-sg-app"
+  description = "Allow traffic from the alb"
+  vpc_id = aws_vpc.main.id 
+  
+  ingress {
+    from_port = 8080
+    to_port = 8080
+    protocol = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+  egress {
+    from_port = 0
+    to_port = 0
+    protocol = -1
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "db" {
+  name = "${var.project_name}-sg-db"
+  description = "Allow MYSQL trafffic from APP server "
+  vpc_id = aws_vpc.main.id
+  
+  ingress {
+    from_port = 3306
+    to_port = 3306
+    protocol = "tcp"
+    security_groups =[aws_security_group.app.id]
+  }
+}
+
+#NACL for data tier
+
+
+resource "aws_network_acl" "data" {
+  vpc_id = aws_vpc.main.id
+  ingress {
+    rule_no = 100
+    protocol = "tcp"
+    action = "allow"
+    cidr_block = aws_subnet.app[0].cidr_block
+    from_port = 3306
+    to_port = 3306
+  }
+  ingress {
+    rule_no = 101
+    protocol = "tcp"
+    action = "allow"
+    cidr_block = aws_subnet.app[1].cidr_block
+    from_port = 3306
+    to_port = 3306
+  }
+  egress {
+    rule_no = 100
+    protocol = "tcp"
+    action = "allow"
+    cidr_block = aws_subnet.app[0].cidr_block
+    from_port = 1024
+    to_port = 65535
+  }
+  egress {
+    rule_no = 101
+    protocol = "tcp"
+    action = "allow"
+    cidr_block = aws_subnet.app[1].cidr_block
+    from_port = 1024
+    to_port = 65535
+  }
+
+}
+
+# IAM role for SSM (No SSH key needed)
+
+
+
+resource "aws_iam_role" "ssm_role" {
+  name = "${var.project_name}-ssm-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+}
+
+
+resource "aws_iam_role_policy_attachment" "ssm_policy" {
+  role       = aws_iam_role.ssm_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+
+  
+resource "aws_iam_instance_profile" "app" {
+  name = "${var.project_name}-app-profile"
+  role = aws_iam_role.ssm_role.name
+}    
