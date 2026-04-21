@@ -1,0 +1,3 @@
+Problem Statement:
+
+A high-volume e-commerce platform experiences massive traffic spikes and cannot afford even 1% downtime. The database must handle millions of reads without slowing down the checkout process, and the entire site must survive a regional disaster with an RTO (Recovery Time Objective) of under 15 minutes.	
