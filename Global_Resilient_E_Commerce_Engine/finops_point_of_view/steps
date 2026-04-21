@@ -1,0 +1,179 @@
+Phase 1: The Finops Data and Storage foundation
+
+Step 1: The network Perimeter (The Rapid Build)
+-----------------------------------------------
+
+Since you mastered the 3-tier VPC in your last project, we need to quickly rebuild that fortress to house our new databases.
+
+1.Go to the VPC Dashboard > Create VPC.
+2.Select VPC and more (We will use the wizard this time for speed, so we can focus on the advanced FinOps features).
+3.Name tag auto-generation: cloudbite-global
+4.IPv4 CIDR block: 10.0.0.0/16
+5.Number of Availability Zones: 2
+6.Number of public subnets: 2
+7.Number of Private Subnets: 4
+8.NAT gateways: In 1 AZ (FinOps tip: 1 NAT is cheaper than 2. For a startup budget, we accept the slight risk of an AZ-specific NAT failure to save $32/month).
+9.VPC endpoints: S3 Gateway (Free, and saves NAT data processing costs).
+10. Click Create VPC. Wait for the green success checks.
+
+Step 2: Automated Storage (S3 Intelligent-Tierring_)
+
+Next, we create the bucket for your e-commerce product images. We will configure it so that old inventory automatically moves to cheaper storage, eliminating idle storage waste.
+
+1.Go to the S3 Dashboard and click Create bucket.
+2.Bucket name: cloudbite-assets-[your-name]-[random-numbers] (Must be globally unique).
+3.Region: us-east-1 (N. Virginia).
+4.Leave all defaults (Block all public access should remain ON) and click Create bucket.
+5.Click into your new bucket and go to the Properties tab.
+6.Scroll down to Intelligent-Tiering Archive Configurations and click Create configuration.
+7.Name: Zombie-Asset-Prevention
+8.Status: Enable
+9.Archive rule actions: 
+* Check Archive Access tier (Data moves here after 90 days of no access).
+* Check Deep Archive Access tier (Data moves here after 180 days).
+
+Click Create
+
+Step 3: The primary Database (RDS Multi-AZ)
+
+Now we deploy the relational database in your private data subnets.
+
+A.Subnet Group
+
+1.Go to RDS > Subnet groups > Create DB subnet group.
+2.Name: cloudbite-db-subnets
+3.VPC: Select your new cloudbite-global-vpc.
+4.Add subnets: Select your two AZs (us-east-1a and us-east-1b), then select the CIDR blocks for your two deepest private subnets (e.g., 10.0.144.0/20 and 10.0.160.0/20). Click Create.
+
+
+B. Launch the Database
+
+1.Go to Databases > Create database.
+2.Creation method: Standard create.
+3.Engine options: MySQL.
+4.Templates: Dev/Test (This enables Multi-AZ without the massive Enterprise minimum instance sizes).
+5.Settings: Name it cloudbite-primary. Set your Master username (admin) and a password.
+6.Instance configuration: Burstable classes > db.t3.micro.
+7.Availability and durability: Select Create a standby instance (Multi-AZ).
+8.Connectivity:
+  * VPC: cloudbite-global-vpc.
+  * DB Subnet group: cloudbite-db-subnets.
+  * Public access: No.
+Security_group: Select choose the existing -> Cloudbite--db-sg  and Remove the default one
+9.Scroll down and click Create database.
+
+
+
+Now we are going to build the critical part of your project Disaster Recovery  plan : The Pilot Light
+
+If a massive hurricane takes down the entire N. Virginia data center, your compute instances (EC2) will die, but compute is stateless and easily replaceable. Data, however, is the lifeblood of an e-commerce company. We need to ensure that every time a user creates an account or updates their shopping cart in N. Virginia, that data is secretly copied to the opposite side of the country in milliseconds.
+
+Here is how we set up the cross-region Read Replica
+
+
+Step 4: The Cross Region "Pilot Light " Replica
+
+1.Stay in the N. Virginia (us-east-1) region in your RDS Dashboard.
+2.Click on Databases and select your cloudbite-primary instance (ensure its status is "Available").
+3.In the top right corner, click the Actions dropdown menu and select Create read replica.
+3.Destination Region: Scroll down and select US West (Oregon). (AWS will automatically handle the encrypted cross-region network backbone for you).
+4.DB instance identifier: Name it cloudbite-dr-replica.
+5.Instance configuration: Select Burstable classes > db.t3.micro.
+6.MultiAZ deployment : Select Single DB instance
+   *Senior FinOps Tip: Why single? Because in a "Pilot Light" scenario, we don't want to pay double for a standby database in a region that isn't even receiving traffic. If we actually have to failover to Oregon during a disaster, we can modify this replica to Multi-AZ later.
+
+7.Connectivity: For the Virtual Private Cloud (VPC), you can select the Default VPC for the Oregon region for this lab. (Note: In a true enterprise environment, you would use an IaC tool like Terraform to build an identical clone of your cloudbite-global-vpc in Oregon before this step).
+9.Public access: Ensure this is set to No.
+10.Scroll to the very bottom and click Create read replica.
+
+Here is how you would survive a Black Friday disaster: 
+
+If us-east-1 goes completely offline, you would log into the Oregon console, select this replica, click Actions, and choose Promote. Within minutes, this read-only database breaks its ties with the dead primary and becomes a fully functional, standalone read/write database. Your business stays alive.
+
+___________________________________________________________________________________________________________________________________________________________
+
+Phase2: High Performance Compute ( the spot strategy)
+
+
+Step 5: The Security Layer 
+Before we launch servers, we need to allow traffic to reach them.
+
+1.Go to the EC2 Dashboard > Security Groups > Create security group.
+2.Create the ALB Security Group:
+  Name: cloudbite-alb-sg
+  VPC: cloudbite-global-vpc
+  Inbound Rules: Allow HTTP (80) from 0.0.0.0/0.
+
+3.Create the App Servers Security Group:
+  Name: cloudbite-app-sg
+  VPC: cloudbite-global-vpc
+  Inbound Rules: Allow HTTP (80) where the source is cloudbite-alb-sg. (This enforces that no one can bypass the load balancer
+  Click Create.
+
+Step 6: The Lauch Template 
+
+This is the blueprint for your servers.
+
+1.Go to Launch Templates (under Instances on the left) > Create launch template.
+2.Name: cloudbite-blackfriday-lt
+3.AMI: Select Amazon Linux 2023.
+4.Instance type: Select t3.small (We will override this dynamically in the ASG step).
+5.Key pair: Select Proceed without a key pair. (We rely on SSM for secure access, as established in your previous architecture).
+6.Network settings: Do not select a subnet. For Security groups, choose cloudbite-app-sg.
+7.Expand Advanced details:
+
+IAM instance profile: Select your SSM role (e.g., AppServerSSMRole if you still have it from the previous project, or create a quick one with AmazonSSMManagedInstanceCore).
+
+User data: Paste this script to start a web server and display the instance type, so you can actually see the Spot instances working later:
+
+#!/bin/bash
+yum update -y
+yum install -y httpd jq
+systemctl start httpd
+systemctl enable httpd
+TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+INSTANCE_TYPE=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-type)
+echo "<h1>CloudBite Black Friday API</h1><p>Running on highly optimized instance: <strong>$INSTANCE_TYPE</strong></p>" > /var/www/html/index.html
+
+8.Click Create launch template.
+
+Step 7:The Finops AutoScaling Group
+
+This is the core of the cost-optimization strategy.
+
+
+1.Go to Auto Scaling Groups > Create Auto Scaling group.
+2.Name: cloudbite-finops-asg. Select cloudbite-blackfriday-lt and click Next.
+3.Network: Select cloudbite-global-vpc and choose your two Private App Subnets.
+4.Instance type requirements (The FinOps Magic):
+   Do NOT select "Adhere to launch template".
+   Select Combine purchase options and instance types
+   Under Allocation Strategies, set:
+     On-Demand base capacity: 1 (This guarantees at least 1 server is always immune to Spot terminations).
+     On-Demand percentage above base: 20% (This means for every 10 servers you scale up, 2 are On-Demand, 8 are heavily discounted Spot).
+     Under Instance types, AWS will auto-suggest compatible types (like t3.small, t3a.small, t2.small). Keep these! If AWS runs out of t3.small spot capacity, it will automatically launch a t2.small instead.
+
+5.Click Next
+6.Load balancing: Select Attach to a new load balancer.
+  Choose Application Load Balancer -> Internet-facing.
+  Subnets: Select your two Public Subnets.
+  Target group: Create new (cloudbite-tg).
+
+7.Click Next until you reach Group size and scaling.
+  Desired: 2, Min: 2, Max: 10.
+  Check Target tracking scaling policy -> CPU utilization at 50%. (During Black Friday, you want to scale up before the server maxes out).
+
+8.Skip the rest and click Create Auto Scaling group.
+
+Verification CheckPoint: 
+
+Go to the EC2 Dashboard and click on Instances. You should see a couple of servers spinning up. Look at the Lifecycle column—you should see at least one marked "Spot" and one marked "normal" (On-Demand).
+
+If you grab your ALB's DNS name and paste it into your browser, you should see your web page proudly displaying the instance type it landed on.
+
+
+
+
+
+
+
