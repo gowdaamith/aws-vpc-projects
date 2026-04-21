@@ -1,0 +1,46 @@
+This project is a masterclass in High-Performance FinOps. We are building a system that can handle the massive traffic of a Black Friday sale while ensuring the infrastructure remains lean, automated, and cost-efficient. We aren't just building a website; we are building a global, self-healing business engine.
+
+Here is the blueprint for everything we will accomplish across the five phases of this project.
+
+1. The Project Roadmap
+
+Phase 1: Global Data Persistence (The Foundation): Establishing an RDS Multi-AZ database in the primary region with a Cross-Region Read Replica in the secondary region. We also implement S3 Intelligent-Tiering for automated storage cost optimization.
+
+Phase 2: High-Performance Compute (The Spot Strategy): Building an Auto Scaling Group (ASG) that utilizes a Mixed Instances Policy. This allows us to use up to 90% cheaper Spot Instances for the bulk of our traffic while keeping a small baseline of On-Demand instances for stability.
+
+Phase 3: Statelessness & Global Caching (The Performance Tier): Decoupling the application by moving shopping carts to DynamoDB On-Demand and using CloudFront to cache product images globally. This reduces the load on our servers and speeds up the user experience.
+
+Phase 4: Decoupled Business Logic (The Event-Driven Tier): Using SQS and Lambda to process orders. This ensures that even if the database is busy during a traffic spike, no orders are lost; they simply wait in a queue for a few milliseconds until they can be processed.
+
+Phase 5: Global Failover & DR (The Pilot Light): Setting up Route 53 Health Checks and Failover routing. We will simulate a total regional collapse and automate the promotion of our Oregon replica to a primary database.
+
+
+key concepts you will master : 
+
+RTO vs. RPO: You will learn how to measure the time it takes to recover (Recovery Time Objective) and how much data you can afford to lose (Recovery Point Objective) during a disaster.
+
+Spot Instance Orchestration: Mastering how to handle "Spot Interruptions" so your users never notice when a server is reclaimed by AWS.
+
+Infrastructure as Code (IaC) Readiness: While we build this in the console, the logic we are using is designed to be easily translated into the reusable Terraform modules we discussed earlier.
+
+Spot Instance Orchestration: Mastering how to handle "Spot Interruptions" so your users never notice when a server is reclaimed by AWS.
+
+
+
+The full Service Stack:
+
+| Service     | Specific Implementation Goal                       | FinOps Value                                   |
+| ----------- | -------------------------------------------------- | ---------------------------------------------- |
+| VPC         | Multi-Tier networking in two regions               | Standardized, secure foundation                |
+| S3          | Storing product images with Intelligent-Tiering    | Zero-effort cost reduction for old data        |
+| RDS (MySQL) | Multi-AZ for local HA; Cross-Region Replica for DR | Reliable data without Aurora's premium cost    |
+| EC2         | Spot Instances + Graviton processors               | Massive savings (up to 90%) on compute         |
+| ASG         | Target Tracking & Mixed Instance Policies          | Scales up for sales, scales to min for savings |
+| ALB         | Distributing traffic across private app subnets    | High availability with built-in health checks  |
+| DynamoDB    | On-Demand capacity for session/cart storage        | Pay only for what you use; scales to infinity  |
+| SQS         | Buffering order messages to prevent DB overloads   | Decouples services; prevents Thundering Herds  |
+| Lambda      | Serverless inventory updates                       | Zero idle cost; charges only when processing   |
+| Route 53    | Failover Routing & Health Checks                   | Automated disaster recovery                    |
+| CloudFront  | Global Content Delivery Network (CDN)              | Offloads 80%+ of image traffic from servers    |
+| CloudWatch  | Dashboards and Alarms                              | Identifies Zombie resources and idle waste     |
+
