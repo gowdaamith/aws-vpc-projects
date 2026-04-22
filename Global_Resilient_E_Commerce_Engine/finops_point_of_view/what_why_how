@@ -1,0 +1,77 @@
+What we are going to DO
+
+We are going to build a "Pilot Light" Disaster Recovery (DR) architecture combined with a highly elastic, cost-optimized primary environment.
+
+In a Pilot Light setup, your primary region handles all the active traffic. In your secondary (DR) region, you only keep the absolute bare minimum "pilot light" running—usually just your synchronized data (database backups and S3 buckets). You do not run any EC2 instances or load balancers in the secondary region until a disaster actually strikes. If the primary region fails, we use an automated script to "spin up" the compute resources around the replicated data.
+
+This gives us maximum cost savings while still surviving a regional outage.
+
+
+The AWS service and Finops Justification 
+
+Every service selected here is chosen  to balancer performance with strict cost control  .
+
+1. Compute & Scaling
+
+Amazon EC2 with Auto Scaling Groups (ASG): The core of our compute layer.
+
+FinOps Justification: We will configure the ASG to use a Mixed Instances Policy. We will use 20% On-Demand instances (to guarantee a baseline of availability) and 80% Spot Instances (which are up to 90% cheaper).
+
+
+Architectural Choice: We will use ARM-based Graviton processors instead of standard x86 Intel/AMD chips. Graviton provides up to 40% better price-performance for standard web applications.
+
+Application Load Balancer (ALB): Distributes incoming traffic across our EC2 instances.
+
+FinOps Justification: While ALB has a base hourly cost, it allows us to consolidate multiple microservices behind a single load balancer using host/path-based routing, rather than paying for an ALB for every single service.
+
+2.Database and Storage
+
+Amazon RDS (PostgreSQL/MySQL): Our primary relational database.
+
+FinOps Justification: We will run a Single-AZ deployment for normal, day-to-day operations to cut RDS costs in half. We will only script the automated creation of a Read Replica just before a known high-traffic event (like Black Friday).
+
+Amazon S3 (Intelligent-Tiering): Stores all product images, static assets, and database backup snapshots.
+
+FinOps Justification: Instead of standard S3, we use Intelligent-Tiering. It automatically moves rarely accessed product images (e.g., out-of-season items) to cheaper storage tiers without any operational overhead.
+
+
+3.Networking and Content Delivery 
+
+Amazon CloudFront (CDN): Caches static content at edge locations worldwide.
+
+FinOps Justification: Serving images and static files directly from EC2 consumes expensive compute cycles and incurs high AWS "Data Transfer Out" costs. CloudFront drastically reduces the load on EC2 and offers much cheaper data transfer rates.
+
+VPC Gateway Endpoints (for S3): Connects our private EC2 instances directly to S3.
+
+FinOps Justification: If our EC2 instances use a NAT Gateway to fetch assets from S3, we get charged a per-GB data processing fee. A VPC Endpoint routes this traffic directly over the AWS internal network for free.
+
+4.Automation and Disaster Recovery 
+
+AWS Lambda & EventBridge: Serverless compute to run our automation scripts.
+
+FinOps Justification: Instead of running a dedicated EC2 instance to manage our DR sync, EventBridge triggers a Lambda function daily to copy our RDS snapshots and S3 data to the secondary region. We only pay for the few seconds the Lambda function runs.
+
+
+
+How the project Works(The Traffic Flow)
+
+Normal Operation :
+1.The User Request: A user browses the e-commerce store. The DNS request hits Route 53
+2.Edge Caching: Route 53 points to CloudFront. If the user requests a product image, CloudFront serves it immediately from a cache close to the user.
+3.Compute Routing: If the user logs in or adds an item to the cart (dynamic requests), CloudFront forwards the traffic to our ALB in the primary region.4.Cost-Optimized Compute: The ALB sends the request to an available EC2 instance in our Auto Scaling Group. If traffic suddenly spikes, the ASG automatically requests cheap Spot instances to handle the load based on CPU metrics (which you can easily export to a Prometheus/Grafana observability stack for deeper analysis).
+5.Database Interaction: The EC2 instance queries the Single-AZ RDS instance to fetch inventory data or update the cart.
+
+Disaster Recovery Scenario:(Regional Outage)
+
+1.Continuous Backup (Pre-Disaster): Every day, AWS Backup or our custom Lambda function takes an RDS snapshot and copies it, along with any new S3 product images, to the secondary AWS Region (e.g., from us-east-1 to us-west-2).
+2.The Outage: us-east-1 goes completely down.
+3.The Trigger: An alert fires. You (the DevOps engineer) run an Infrastructure as Code (Terraform) script against the secondary region.
+4.The Recovery: * The script restores the copied RDS snapshot into a live database.
+
+ * It provisions an ALB and an Auto Scaling Group in the secondary region.
+
+ * Route 53 is updated to point to the new ALB.
+
+5.Result: The platform is back online. You accepted a slightly longer Recovery Time Objective (RTO)—perhaps 15 to 30 minutes to spin up the infrastructure—in exchange for paying $0 in compute costs for the DR region during the months/years when there was no disaster.
+
+This setup proves you can build highly resilient, scalable infrastructure without ignoring the realities of business operating costs.
