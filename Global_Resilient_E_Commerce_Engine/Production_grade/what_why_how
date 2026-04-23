@@ -49,4 +49,16 @@ You don't manually SSH into servers or click around the console to update this b
 
 ArgoCD: You write your Kubernetes configurations (Helm charts) and push them to a Git repository. ArgoCD constantly watches that repository. If you update the code for the CloudBite cluster, ArgoCD automatically pulls the changes and updates the live EKS cluster seamlessly.
 
-Prometheus & Grafana: Prometheus scrapes metrics from every single container (CPU, memory, active connections), and Grafana gives you beautiful dashboards to visualize the health of your entire cluster in real-time.
+Prometheus & Grafana: Prometheus scrapes metrics from every single container (CPU, memory, active connections), and Grafana gives you beautiful dashboards to visualize the health of your entire cluster in real-time
+
+
+
+____________________________________________________________________________
+
+
+Step by Step how the Traffic Flow : How it connects 
+
+1.The user clicks "Checkout".
+2.The request travels securely through the Global Accelerator, passes the WAF inspection, and hits the ALB.
+3.The ALB forwards the request to the NGINX Ingress Controller inside EKS.
+
