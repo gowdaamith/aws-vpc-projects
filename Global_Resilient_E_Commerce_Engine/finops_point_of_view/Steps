@@ -1,0 +1,196 @@
+ Phase 1: The Network Foundation 
+
+Before we deploy any servers ,we need a virtual private cloud (VPC) .A poorly  designed network  is where many hidden AWS costs originate (especially data transfer and NAT gateway fees)
+
+Here is the exact networking design we need to build in our primary region 
+
+
+Phase 1: The FinOps Network Foundation
+
+Before we deploy any servers, we need a Virtual Private Cloud (VPC). A poorly designed network is where many hidden AWS costs originate (especially data transfer and NAT Gateway fees).
+
+Here is the exact networking design we need to build in our primary region (e.g., us-east-1):
+
+1. The VPC and Subnets
+We need high availability across two Availability Zones (AZs) for the Load Balancer, but we want to tightly control where resources live.
+
+Step 1:  Navigate to the VPC dashboard 
+
+1.Log into your AWS Management Console.
+2.Ensure you are in your preferred region (e.g., N. Virginia - us-east-1) using the dropdown in the top right corner.
+3.In the search bar at the top, type VPC and click on the VPC service.
+4.In the VPC dashboard, click the orange Create VPC button.
+
+Step 2: Configure the "VPC and more" Wizard
+
+AWS gives you two options here. We want to use the visual wizard because it automatically handles the complex route tables for us.
+
+1.Under Resources to create, select VPC and more.
+2.Under Name tag auto-generation, leave the checkbox checked and type finops-project in the text box. (AWS will use this prefix to neatly name all your subnets and route tables).
+3.Under IPv4 CIDR block, leave it as the default 10.0.0.0/16.
+4.Keep IPv6 CIDR block set to No IPv6 CIDR block.
+5.Keep Tenancy set to Default.
+
+
+Step 3: Configuration of Availability Zones and subnets
+
+Here we set up our multi-Az architecuture
+1.Under Number of Availability Zones (AZs), select 2. (It will likely select us-east-1a and us-east-1b automatically).
+2.Under Number of public subnets, select 2.
+3.Under Number of private subnets, select 4.
+
+      Note: The wizard only lets us choose "Private". Later, we will use two of these for our EC2 instances (App layer) and two strictly for our RDS database (Data layer).
+
+4.You can leave the "Customize subnets CIDR blocks" section as the default values AWS provides.
+
+Step 4: Apply the FinOps Settings (Crucial Step)
+
+This is where we implement our cost saving measures:
+
+1.NAT gateways ($): Select In 1 AZ.
+
+Why: Selecting "1 per AZ" doubles your baseline NAT Gateway costs. Selecting "In 1 AZ" gives our private subnets internet access through a single gateway.
+
+2.VPC endpoints: Select S3 Gateway.
+
+Why: This is our "secret weapon." It creates a free, private tunnel directly to S3. Without this, your EC2 instances would route S3 traffic through the NAT Gateway, and AWS would charge you data processing fees for your own images.
+
+3.Leave DNS options checked (both "Enable DNS resolution" and "Enable DNS hostnames" should be checked).
+
+Step 5: Review and Create 
+
+1.Look at the Preview panel on the right side of the screen. You should see a diagram showing your VPC, your subnets, 1 Internet Gateway, 1 NAT Gateway, and 1 S3 Endpoint.
+
+2.Click the orange Create VPC button at the bottom.
+
+3.Wait a few moments. AWS will run through a checklist, provisioning all the route tables and attaching the gateways automatically. Once it says "Success", click View VPC.
+
+Step 6: Rename the Database Subnets
+
+To make things easier for ourselves when we build the database, let's clearly label our subnets.
+
+1.On the left-hand menu, click on Subnets.
+2.In the search bar, type finops-project-private. You will see four subnets.3.We need to reserve two of these for the database. Look at the AZ column to find one in us-east-1a and one in us-east-1b.
+4.Hover over the name of one of them, click the small pencil icon to edit the name, and change it from finops-project-private... to finops-project-isolated-db-1a. Click Sa
+5.Do the same for a subnet in the other AZ, naming it finops-project-isolated-db-1b.
+6.(Optional) You can edit the Route Tables for these two "isolated" subnets and remove the route that points to the NAT Gateway ( 0.0.0.0/0 -> nat-... ) to ensure the database has zero outbound internet access for maximum security.
+
+
+[ if you want to use your own instance as the NAT GATEWAY instead of spending heavy money use the following approach : 
+
+Do not select the option of creating the NAT GATEWAY while creating the VPC 
+
+Next: 
+Step 1: Create a Security Group for the NAT Instance
+
+The NAT instance needs to accept traffic from your private subnets and send it out to the internet.
+
+1.Go to the EC2 Dashboard.
+2.On the left menu, scroll down to Network & Security and click Security Groups.
+3.Click Create security group.
+4.Name: finops-nat-sg.
+5.Description: Security group for NAT instance.
+6.VPC: Select your finops-project VPC.
+7.Inbound Rules: * Click Add rule.
+                   Type: All traffic.
+                   Source: Custom, and type in your VPC's CIDR block (e.g., 10.0.0.0/16). This allows all instances in your VPC to send traffic to the NAT instance.
+8.Outbound Rules: Leave as default (All traffic to 0.0.0.0/0).
+9.Click Create security group.
+
+Step 2: Launch the NAT EC2 Instance
+We will launch a cheap, ARM-based instance (these have g in there name ) and inject a script that configures it as a router
+
+1.On the EC2 Dashboard, click Launch instance.
+2.Name: finops-nat-instance.
+3.Application and OS Images (AMI): Select Amazon Linux 2023 AMI (ensure the architecture is set to 64-bit (Arm) for cost savings).
+4.Instance Type: Select t4g.nano (this is the cheapest ARM instance available, perfect for a FinOps project).
+5.Key pair: Select your existing key pair or create a new one.
+6.
+Network Settings: click Edit.
+--VPC: Select your finops-project VPC.
+--Subnet: Select Public Subnet A (finops-project-public-us-east-1a). It must be a public subnet.
+--Auto-assign public IP: Select Enable.
+--Firewall (security groups): Select Select existing security group, and choose the finops-nat-sg you just created.
+-- Scroll all the way down to User data. Paste the following bash script. This script tells the Linux kernel to allow IP forwarding and uses iptables to disguise private IP traffic as public IP traffic (Masquerading):
+
+
+#!/bin/bash
+
+# Enable IP forwarding in the kernel,normally system behaves like a computer but this command makes it to behave like a router 
+#Allow this machine to forward traffic from one network to another 
+
+echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.d/custom-ip-forwarding.conf
+sudo sysctl -p /etc/sysctl.d/custom-ip-forwarding.conf
+
+# Find the primary network interface name dynamically (usually enX0)
+# This is used to find the main internet facing network interface 
+
+INTERFACE=$(ip route | grep default | awk '{print $5}')
+
+# Install iptables
+# Install and start iptabels (Linux firewall and routing tool)
+
+
+sudo dnf install iptables-services -y
+sudo systemctl enable iptables
+sudo systemctl start iptables
+
+# Configure NAT routing (Masquerade)
+# Changes the private IP address into your server's public ip ,allow private machine to access the internet
+
+sudo iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE
+
+# Save the iptables rules so they persist after a reboot
+sudo /usr/libexec/iptables/iptables.init save
+
+5.Click Launch instance.
+
+
+Step 3: Disable the source and destination check (CRITICAL)
+
+By default, AWS blocks an EC2 instance from receiving network traffic that isn't specifically addressed to it. Since our NAT instance is acting as a router for other instances, we must disable this security check, or it will silently drop all the traffic.
+
+1.Go back to the Instances list in the EC2 console.
+2.Check the box next to your finops-nat-instance.
+3.Click the Actions dropdown menu at the top.
+4.Go to Networking -> Change source/destination check.
+5.Check the box that says Stop (meaning Stop the check).
+6.Click Save.
+
+Step 4: Update the Private Route Tables
+
+Now we need to tell your private subnets to send their internet-bound traffic to this new NAT instance.
+
+1.Navigate back to the VPC Dashboard.
+2.On the left menu, click Route Tables.
+3.You will see several route tables. Look at the "Explicit subnet associations" column to find the ones associated with your Private subnets.
+4.Select a Private Route Table.
+5.Click the Routes tab at the bottom, then click Edit routes.
+6.If there is an existing route for 0.0.0.0/0 pointing to a nat-... (the one you deleted), delete it.
+7.click Add route
+8.Destination: 0.0.0.0/0.
+9.Target: Select Instance, and choose your finops-nat-instance.
+10.Click Save changes.
+11.Repeat this step for the route table associated with your other private subnets. (Do not do this for your isolated DB subnets, as they shouldn't have internet access anyway).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
