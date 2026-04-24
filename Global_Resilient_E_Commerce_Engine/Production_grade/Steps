@@ -1,0 +1,585 @@
+
+The Data Layer : 
+
+The Data Layer. Your microservices for CloudBite cannot function without a place to store state and data.
+
+We will use Terraform to declare this infrastructure. We are going to start by provisioning the DynamoDB Global Table which will act as the ultra-fast, multi-region cache for your user sessions and active food carts.
+
+Step 1: Set up the workspace
+
+Create a new directory  for your database infrastructure and navigate into it
+
+>> mkdir cloudbite-global-data
+>> cd cloudbite-global-data
+
+Step 2: The provider configuration (provider.tf)
+
+Because we are building a multi-region architecture ,we have to tell terraform how to talk to both regions .Create a file named provider.tf and paste this in : 
+
+terraform{
+  required_provider  {
+    aws = {
+      source = "hashicorp/aws"
+      version = "~>5.0"
+    }
+  }
+}
+#Primary region
+
+provider "aws"{
+  region = "ap-south-1"
+  alias = "primary"
+}
+
+# secondary / DR region 
+
+provider "aws"{
+  region = "ap-southeast-1"
+  alias = "secondary"
+}
+
+
+
+dynamodb.tf
+
+resource "aws_dynamodb_table" "cloudbite_sessions"{
+  provider = aws.primary 
+  name = "cloudbite-user-sessions"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key = "SessionId"
+  
+  deletion_protection_enabled = true
+  attribute {
+    name = "SessionId"
+    type = "S"
+  }
+  point_in_time_recovery {
+    enabled = true
+  }
+  
+  stream_enabled = true  
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+  
+  replica {
+    region_name = "ap-southeast-1"
+    propogate_tags = true
+    point_in_time_recovery = true
+  }
+  ttl {
+    attribute_name = "Expiration_time"
+    enabled = true
+  }
+  server_side_encryption {
+    enable = true
+  }
+  tags = {
+    Environment = "Production"
+    Project     = "CloudBite"
+    Component   = "StateDatabase"
+  }
+
+    
+}
+
+Now we deploy this to your AWS account .Run these commands in your terminal one by one:
+
+terraform init
+terraform plan
+terraform apply
+
+While that deploys, you will have a globally replicated, serverless database that scales infinitely without you ever having to manage a server.
+
+
+
+
+Amazon Aurora PostgreSQL  Global Database.
+
+For CloudBite's core transactional data—like final order receipts, user profiles, and payment statuses—DynamoDB isn't enough. We need strict ACID compliance (so nobody gets double-charged) but with the ability to survive a region-wide failure.
+
+An Aurora Global Database spans multiple AWS regions. It uses dedicated AWS infrastructure to replicate your data from the primary region to the secondary region with less than 1 second of lag. If your primary region goes down, the secondary region can be promoted to full read/write capacity in under a minute.
+
+Here is the terrform configuration .Create a new file name aurora.tf
+
+# The Global RDS Cluster Object 
+# This acts as the container for cross - region replication 
+
+resource "aws_rds_global_cluster" "cloudbite_global" {
+  provider = aws.primary 
+  global_cluster_identifier = "cloudbite-global-db"
+  engine = "aurora-postgresql"
+  engine_version = "15.4"
+  database_name = "cloudbite_core"
+  storage_encrypted = true
+}
+
+# The primary Database cluster (main region - ap-south-1)
+
+resource "aws_rds_cluster" "primary" {
+  provider = aws.primary 
+  engine = aws_rds_global_cluster.cloudbite_global.engine
+  engine_version = aws_rds_global_cluster.cloudbite_global.engine_version
+  cluster_identifier = "cloudbite-primary-cluster"
+  global_cluster_identifier = aws_rds_global_cluster.cloudbite_global.id
+  
+  
+  master_username = "dbadmin"
+  master_password = "SuperSecretPassword123!"
+  
+  backup_retention_pretection = 14
+  preferred_backup_window = "02:00-03:00"
+  storage_encrypted = true 
+  deletion_protection = true
+  skip_final_snapshot = false 
+}
+
+
+# Primary cluster compute Instance (multi-az for local high availability )\
+
+resource " aws_rds_cluster_instance" "primary_instances" {
+  provider = aws.primary 
+  count  = 2 
+  identifier = "cloudbite-primary-instance-${count.index + 1}"
+  cluster_identifier = aws_rds_cluster.primary.id
+  instance_class = "db.r6g.large"
+  engine = aws__rds_cluster.primary.engine
+  engine_version  = aws_rds_cluster.primary.engine_version
+}
+
+resource "aws_rds_cluster" "secondary" {
+  provider = aws.secondary
+  engine = aws_rds_global_cluster.cloudbite_global.engine
+  engine_verison = aws_rds_global_cluster.cloudbite_global.engine_version
+  cluster_identifier = "cloudbite-secondary-cluster"
+  global_cluster_identifiere = aws_rds_global_cluster.cloudbite_global.id
+  
+
+  storage_encrypted = true
+  skip_final_snapshot = true
+ 
+  depends_on = [
+    aws_rds_cluster_instance.primary_instances
+  ]
+}
+
+resource "aws_rds_cluster_instance" "secondary_instance" {
+  provider = aws.secondary
+  count                = 1 # Only 1 instance needed here until a disaster occurs
+  identifier           = "cloudbite-secondary-instance-${count.index + 1}"
+  cluster_identifier   = aws_rds_cluster.secondary.id
+  instance_class       = "db.r6g.large"
+  engine               = aws_rds_cluster.secondary.engine
+  engine_version       = aws_rds_cluster.secondary.engine_version
+}
+
+
+Key enterprise feature : 
+
+Global Inheritance: The secondary cluster doesn't have a master username or password block. It natively syncs all security credentials and schema data from the global object.
+
+Asymmetrical Compute: Notice the count parameters. The primary cluster has count = 2 (running in Multi-AZ for high availability during normal traffic). The secondary cluster has count = 1 because it is just a "Warm Standby" receiving replication data. You don't need to pay for 2 instances in the DR region unless a disaster actually happens (at which point you scale it up).
+
+Storage Encryption & Deletion Protection: Both are hardcoded to true to ensure the data cannot be read without KMS keys and the cluster cannot be wiped out by a fat-fingered CLI command.
+
+
+____________________________________________________________________________
+
+
+                                      
+The compute layer 
+
+While the Terraform is fantastic  for static infrastructure like datbase ,managing the intricate  web of IAM roles  ,security groups and VPC configuration required  for  a kubernetes control plane via Terraform can quickly become a nightmare 
+
+
+
+Instead, DevOps engineers use eksctl, the official CLI tool developed by AWS and Weaveworks. You define the entire cluster in a single, readable YAML file, and eksctl automatically translates it into AWS CloudFormation templates to build the network, the control plane, and the worker nodes safely.
+
+Let's write the cluster configuration file. Create a file named cloudbite-cluster.yaml.
+
+The Production-Grade EKS Configuration (cloudbite-cluster.yaml)
+This configuration does three critical things for a production environment:
+
+1.Spans 3 Availability Zones: For absolute high availability.
+2.Enables IAM OIDC Provider: This is a massive security upgrade. It allows your individual microservices (Pods) to assume IAM roles. Instead of giving the entire EC2 server permission to read DynamoDB, you only give permission to the specific Node.js pod that needs it.
+3.Bootstraps a Managed Node Group: This provisions our baseline compute capacity so the cluster has somewhere to run our core system controllers (like ArgoCD and the Ingress controller).
+
+
+cloudbite-cluster.yaml
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata: 
+  name: cloudbite-production-cluster
+  region: ap-south-1
+  version: "1.29"
+  tags: 
+    Environment: Production 
+    Project: Cloudbite
+  
+vpc: 
+  subnets:
+    private: 
+      ap-south-1a: { id: subnet-0123456789abcdef0}
+      ap-south-1b: { id:  subnet-0123456789abcdef0}
+      ap-south-1d { id : subnet-0123456789abcdef0 }
+iam: 
+  withOIDC: true
+  serviceAccounts: 
+  #  Pre-configuring the IAM role for the AWS loadbalancer controller we will install later 
+    - metadata: 
+        name: aws-load-balancer-controller
+        namespace: kube-system
+      wellknowPolicies: 
+        awsLoadBalancerController: true
+   
+
+How to Deploy the Cluster
+Once you have saved that file (and updated the subnet IDs to match the VPC you would have created), you run a single command in your terminal:
+
+
+>> eksctl create cluster -f cloudbite-cluster.yaml
+
+
+What happens next:
+Go grab a coffee. EKS clusters take roughly 15 to 20 minutes to provision. eksctl is working in the background to:
+
+1.Spin up the highly available Kubernetes control plane (managed by AWS).
+2.Create the EC2 Auto Scaling Group for your t3.large worker nodes.
+3.Securely join those worker nodes to the cluster.
+4.Automatically update your local ~/.kube/config file so your terminal can talk to the new cluster.
+
+
+Verfiying the build : 
+
+Once the command finishes, you can verify your cluster is alive and communicating by running:
+
+kubectl get nodes
+
+YOu should see 3 nodesw in Ready state
+
+
+
+The production VPC terraform code (vpc.tf)
+
+We willuse the official AWS VPC terraform module . It handels all the complex route tabel ,NAT gateways and EKS tagging automatically 
+
+Create file named VPC.tf in your terraform directory and paste this code
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  name = "cloudbite-production-vpc"
+  cidr = "10.0.0.0/16"
+
+  # 3 Availability Zones for High Availability
+  azs             = ["ap-south-1a", "ap-south-1b", "ap-south-1c"]
+  
+  # Private subnets for your EKS Worker Nodes and Pods
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  
+  # Public subnets strictly for your ALBs and NAT Gateways
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+  # Production NAT Gateway Setup (1 per AZ for true high availability)
+  enable_nat_gateway     = true
+  single_nat_gateway     = false 
+  one_nat_gateway_per_az = true
+
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  # CRITICAL: These tags are required for the AWS Load Balancer Controller to work
+  public_subnet_tags = {
+    "kubernetes.io/role/elb" = 1
+  }
+
+  private_subnet_tags = {
+    "kubernetes.io/role/internal-elb" = 1
+  }
+
+  tags = {
+    Environment = "Production"
+    Project     = "CloudBite"
+  }
+}
+
+# Output the private subnet IDs so we can copy them into our eksctl yaml
+output "eks_private_subnets" {
+  value = module.vpc.private_subnets
+}  
+
+The workflow 
+1.You run  terraform apply on this vpc.tf file
+2.TErraform builds your highly available network 
+3.At the end.TErraform outputs your three private subnets ID's
+4.You copy those three ID's paste them into the cloudbite-cluster.yaml file we wrote earlier
+5.Then you run eksctl create cluster -f cloudbite-cluster.yaml
+
+This guarantees your EKS cluster boots up inside a rock-solid, production-ready network foundation.
+
+
+This phase is where we install the AWS Load Balancer Controller using Helm. This controller is the "brain" that lives inside your cluster, constantly watching for new microservices. When you eventually deploy the frontend for CloudBite, this controller is what will dynamically spin up an Application Load Balancer in those public subnets we just built and route the traffic directly to your Pod IPs.
+
+Here is how you install it : 
+
+Helm is the package manager for Kubernetes (think of it like npm for Node.js or pip for Python). We need to tell Helm where to find the official AWS controller packages.
+
+
+Step 2: Install the Controller
+
+Because we were smart and used eksctl in the previous phase to pre-create the IAM role and the Kubernetes Service Account (aws-load-balancer-controller), this installation is incredibly clean. We just have to tell Helm to use the Service Account that already exists.
+
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName=cloudbite-production-cluster \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller
+
+Step 3: Verify the Installation
+It takes a few seconds for the pods to spin up. You can check if the controller is running successfully by asking kubectl to show you the pods in that namespace:
+
+kubectl get pods -n kube-system | grep aws-load-balancer-controller
+
+Once those pods are alive, your Kubernetes cluster is officially physically connected to your AWS networking layer. It is now capable of exposing your applications to the public internet securely!
+
+
+
+The Global Edge Terraform Code (Edgs.tf)
+
+# the global accelerator 
+
+resource "aws_globalaccelerator_accelerator" "cloudbite_ga" {
+  name = "cloudbite-production-accelerator"
+  ip_address_type = "IPV4"
+  enabled = true
+   
+  attributes {
+    flow_logs_enabled = true
+    flow_logs_s3_bucket = "cloudbite-logs-bucket"
+    flow_logs_s3_prefix = "ga-logs"
+  }
+}
+
+The Listener 
+
+resource "aws_globalaccelerator_listener" "cloudbite_https" {
+  accelerator_arn = aws_globalaccelerator.cloudbite-production-accelerator.arn
+  client_affinity = "SOURCE_IP"
+  protocol = "TCP"
+  
+  port_range {
+    from_port = 80
+    to_port = 80
+  }
+}
+resource "aws_globalaccelerator_endpoint_group" "primary_region " {
+  listener_arn  = aws_globalaccelerator_listener.cloudbite_https.id
+  endpoint_group_region = "ap-south-1"
+  traffic_dial_percentage = 100
+  endpoint_configuration { 
+    endpoint_id = var.primary_alb_arn
+    weight = 100
+  }
+  
+}
+resource "aws_globalaccelerator_endpoint_group" "secondary_region" {
+  listener_arn = aws_globalaccelerator_listerner.cloudbite_https.id
+  traffic_dial_percentage = 0 
+  endpoint_group_region = "ap-southeast-1"
+  endpoint_configuration {
+    endpoint_id = var.secondary_alb_arn
+    weight = 100 
+  }
+}
+
+
+data "aws_route53_zone" "cloudbite" {
+  name = "cloudbite.com."
+}
+
+resource "aws_route53_record" "api"{
+  zone_id = data.aws_route53_zone.cloudbite.zone_id
+  name = "api.cloudbite.com"
+  type = "A"
+  alias { 
+    name                   = aws_globalaccelerator_accelerator.cloudbite_ga.dns_name
+    zone_id                = aws_globalaccelerator_accelerator.cloudbite_ga.hosted_zone_id
+    evaluate_target_health = true
+
+   }
+}
+
+CLOUDFRONT CDN (content delivery network)
+
+If we send every single request for a food image, CSS file, or React/Vue frontend asset through the Global Accelerator and into our EKS cluster, we are going to waste massive amounts of expensive compute power just serving static files.
+
+We decouple the static frontend from the dynamic backend using CloudFront. CloudFront caches these static assets in over 400 edge locations globally. When a user in London opens CloudBite, they download the images from a server in London, not from your EKS cluster in Mumbai.
+Here is the Terraform code to build the highly secure CDN layer. Create a file named cloudfront.tf.
+
+# 1. The S3 Bucket for Static Assets (Images, Frontend UI)
+
+# 1. The S3 Bucket for Static Assets (Images, Frontend UI)
+resource "aws_s3_bucket" "cloudbite_frontend" {
+  bucket = "cloudbite-production-frontend-assets"
+}
+
+# 2. Block ALL public access to the bucket
+resource "aws_s3_bucket_public_access_block" "private_bucket" {
+  bucket                  = aws_s3_bucket.cloudbite_frontend.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# 3. Origin Access Control (The Security Guard)
+resource "aws_cloudfront_origin_access_control" "cloudbite_oac" {
+  name                              = "cloudbite-frontend-oac"
+  description                       = "OAC for CloudBite Frontend"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+# 4. The CloudFront Distribution (The Edge Cache)
+resource "aws_cloudfront_distribution" "cloudbite_cdn" {
+  enabled             = true
+  is_ipv6_enabled     = true
+  default_root_object = "index.html"
+  price_class         = "PriceClass_All" # Use all global edge locations
+
+  # Pointing to the S3 Bucket
+  origin {
+    domain_name              = aws_s3_bucket.cloudbite_frontend.bucket_regional_domain_name
+    origin_id                = "S3-cloudbite-frontend"
+    origin_access_control_id = aws_cloudfront_origin_access_control.cloudbite_oac.id
+  }
+
+  # Caching Behavior
+  default_cache_behavior {
+    allowed_methods  = ["GET", "HEAD", "OPTIONS"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = "S3-cloudbite-frontend"
+
+    viewer_protocol_policy = "redirect-to-https" # Force SSL
+    compress               = true
+
+    # Use AWS Managed Caching Policy for S3
+    cache_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6" 
+  }
+
+  viewer_certificate {
+    cloudfront_default_certificate = true
+    # In production, you attach your ACM Certificate here for custom domains
+  }
+
+  tags = {
+    Environment = "Production"
+    Project     = "CloudBite"
+    Owner       = "amithkn.23ise@cambridge.edu.in"
+  }
+}
+
+# 5. The Bucket Policy (Allowing CloudFront to actually read the files)
+resource "aws_s3_bucket_policy" "allow_cloudfront" {
+  bucket = aws_s3_bucket.cloudbite_frontend.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowCloudFrontServicePrincipal"
+        Effect    = "Allow"
+        Principal = { Service = "cloudfront.amazonaws.com" }
+        Action    = "s3:GetObject"
+        Resource  = "${aws_s3_bucket.cloudbite_frontend.arn}/*"
+        Condition = {
+          StringEquals = {
+            "AWS:SourceArn" = aws_cloudfront_distribution.cloudbite_cdn.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
+
+
+
+The Edge Architecture is Complete!
+With this deployed, you have a globally distributed, high-performance edge.4Static assets hit CloudFront (S3).
+
+Dynamic API calls hit Route 53 -> Global Accelerator -> EKS.
+
+
+This completely shields your application from brute-force load and guarantees lightning-fast load times for your users.
+
+
+Gitops 
+
+With GitOps, your GitHub repository becomes the single source of truth. ArgoCD lives inside your EKS cluster, constantly watching your food_booking_app repository. If it detects a change in your code (e.g., you pushed a new image tag for the FastAPI Search or Flask Recommender microservice), ArgoCD automatically pulls the new manifest and syncs the live cluster to match it.
+
+
+Here is how we install and configure the continuous deployment engine.
+
+Step 1: Install ArgoCD into the EKS Cluster
+
+We will create a dedicated namespace for ArgoCD and install it using its official manifest. Run these commands in your terminal:
+
+
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+
+kubectl get pods -n argocd
+
+
+Step 2: Define the CloudBite Application
+Now we need to tell ArgoCD exactly where your Kubernetes YAML files live. We do this by creating a Custom Resource Definition (CRD) called an Application.
+
+
+Create a file named cloudbite-argocd-app.yaml and paste the following configuration. This assumes you keep your Kubernetes deployment files in a folder called k8s-manifests inside your repository.
+
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cloudbite-production
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # The repository containing your multi-stage Dockerfiles and k8s manifests
+    repoURL: 'https://github.com/your-username/food_booking_app.git'
+    path: k8s-manifests
+    targetRevision: HEAD
+  destination:
+    # Deploying to the same cluster ArgoCD is running in
+    server: 'https://kubernetes.default.svc'
+    namespace: production
+  
+  # The Magic: GitOps Automation
+  syncPolicy:
+    automated:
+      prune: true     # Automatically delete pods if you remove them from Git
+      selfHeal: true  # If someone manually edits the cluster, ArgoCD forces it back to match Git
+    syncOptions:
+      - CreateNamespace=true
+
+
+Apply this configuration to the cluster:
+
+>> kubectl apply -f cloudbite-argocd-app.yaml
+
+Step 3: The GitOps Workflow in ActionWith that single YAML file applied, your deployment pipeline is now fully automated and self-healing. Here is how your daily engineering workflow operates from this point forward:
+
+Code & Containerize: You write a new feature for the Go checkout service and build the image.
+
+Push to Registry: Your CI pipeline (like GitHub Actions) pushes the new container image to Amazon ECR (Elastic Container Registry).
+
+Update Manifest: The CI pipeline updates the image tag in your deployment.yaml file inside the food_booking_app repository.
+
+ArgoCD Sync: ArgoCD detects the new commit in GitHub. Within 3 minutes, it initiates a rolling update in EKS. It spins up the new Go pods, waits for them to become healthy, and gracefully shuts down the old ones, resulting in zero downtime for users.
+
+The Architecture is Complete
+    

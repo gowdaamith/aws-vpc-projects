@@ -61,4 +61,11 @@ Step by Step how the Traffic Flow : How it connects
 1.The user clicks "Checkout".
 2.The request travels securely through the Global Accelerator, passes the WAF inspection, and hits the ALB.
 3.The ALB forwards the request to the NGINX Ingress Controller inside EKS.
+4.The Ingress Controlles  routes the request to the Node.js checkout service
+5.The Node.js pod quickly fetches the user's cart items from DynamoDB
+6.The Node.js pod package the order data and pushes an event into the SQS queue immediately returning a success screen to the user 
+7.A separate backend worker pod (e.g., written in Go) pulls the message from the SQS Queue.
+8.The Go worker pod processes the payment logic and permanently writes the final receipt to the Aurora PostgreSQL database.
 
+
+This architecture ensures that no matter what fails—a container, an Availability Zone, or a whole region—the system heals itself, traffic is rerouted, and the user never experiences downtime.
