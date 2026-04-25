@@ -175,7 +175,325 @@ Now we need to tell your private subnets to send their internet-bound traffic to
 
 
 
+___________________________________________________________________________
 
+Phase 2 : The data Layer 
+
+In this phase we will provision our S3 bucket for product images and our singel AZ RDS
+
+Step 1: Create the Finops S3 bucket
+
+We will create a bucket and immediately apply a Lifecycle Rule to move all uploaded product images into the Intelligent-Tiering storage class. This automatically moves cold data (like last season's product images) to a cheaper storage tier, saving money without any performance hit.
+
+1.Navigate to the S3 service in the AWS Console.
+2.Click Create bucket.
+3.Bucket name: Enter a globally unique name (e.g., finops-ecommerce-assets-yourinitials).
+4.AWS Region: Select the same region as your VPC (e.g., us-east-1).
+5.Object Ownership: Leave as ACLs disabled (recommended).
+6.Block Public Access settings: Keep Block all public access CHECKED. (This is a security best practice; later, we will explicitly allow only our CloudFront CDN to read these images).
+7.Scroll to the bottom and click Create bucket.
+
+Apply the intelligent-tiering Rule :
+1.Click on your newly created buket name 
+2.Go to the Management tab.
+3.Under Lifecycle rules,click create Lifecycle rule
+4.Lifecycle rule name: Move-To-Intelligent-Tiering.
+5.Rule scope: Select Apply to all objects in the bucket. (Check the acknowledgment box that appears).
+6.LifeCycle rule actions: Checkc Trasition current version of objects between storage classes
+7.Under Transition current versions of objects, select Intelligent-Tiering from the dropdown, and enter 0 for "Days after object creation". (This means files go straight to FinOps storage the moment they are uploaded).
+8.click create rule 
+
+
+Step 2: Create  the Database Subnet Group
+
+Before we launch the database, we must tell RDS exactly which subnets it is allowed to use. We want to lock it into the two isolated subnets we named in Phase 1.
+
+
+1.Navigate to the RDS service in the console.
+2.That is a perfectly reasonable call. Knowing how to build a custom NAT instance is a great networking flex, but in a real-world production environment, the AWS Managed NAT Gateway is the undisputed standard because it requires zero maintenance, scales bandwidth automatically, and doesn't introduce a single point of failure. It keeps your 60-day AWS hands-on journey focused on architectural design rather than OS-level troubleshooting!
+
+Let's stick with the Managed NAT Gateway in 1 AZ (as configured in Phase 1) and move to Phase 2: The Data Layer.
+
+In this phase, we will provision our S3 bucket for product images and our Single-AZ RDS database.
+
+Here are the exact console steps to build the FinOps-optimized data layer.
+
+Step 1: Create the FinOps S3 Bucket
+We will create a bucket and immediately apply a Lifecycle Rule to move all uploaded product images into the Intelligent-Tiering storage class. This automatically moves cold data (like last season's product images) to a cheaper storage tier, saving money without any performance hit.
+
+Navigate to the S3 service in the AWS Console.
+
+Click Create bucket.
+
+Bucket name: Enter a globally unique name (e.g., finops-ecommerce-assets-yourinitials).
+
+AWS Region: Select the same region as your VPC (e.g., us-east-1).
+
+Object Ownership: Leave as ACLs disabled (recommended).
+
+Block Public Access settings: Keep Block all public access CHECKED. (This is a security best practice; later, we will explicitly allow only our CloudFront CDN to read these images).
+
+Scroll to the bottom and click Create bucket.
+
+Apply the Intelligent-Tiering Rule:
+Click on your newly created bucket name.
+
+Go to the Management tab.
+
+Under Lifecycle rules, click Create lifecycle rule.
+
+Lifecycle rule name: Move-To-Intelligent-Tiering.
+
+Rule scope: Select Apply to all objects in the bucket. (Check the acknowledgment box that appears).
+
+Lifecycle rule actions: Check Transition current versions of objects between storage classes.
+
+Under Transition current versions of objects, select Intelligent-Tiering from the dropdown, and enter 0 for "Days after object creation". (This means files go straight to FinOps storage the moment they are uploaded).
+
+Click Create rule.
+
+Step 2: Create the Database Subnet Group
+Before we launch the database, we must tell RDS exactly which subnets it is allowed to use. We want to lock it into the two isolated subnets we named in phase 1.
+
+1.Navigate to the RDS service in the console.
+2.On the left-hand menu, click Subnet groups.
+3.Click Create DB subnet group.
+4.Name: finops-db-subnet-group.
+5.Description: Isolated subnets for e-commerce DB.
+6.VPC: Select your finops-project VPC.
+7.Under Add subnets, choose your two Availability Zones (e.g., us-east-1a and us-east-1b).
+8.For the subnets, select the IPv4 CIDRs that correspond to your isolated subnets (if you aren't sure which ones they are, open the VPC dashboard in a new tab to cross-reference the CIDRs of finops-project-isolated-db-1a and 1b).
+9.Click Create.
+
+Step 3: Launch the single AZ RDS instance 
+
+We are going to deploy a cost-optimized .ARM based RDS instance . We will turn off multi-AZ and storage Autoscaling to ensure the bill stays completely flat
+
+1.On the left-hand menu in the RDS dashboard, click Databases.
+2.Click Create database.
+3.Creation method: Select Standard create.
+4.Engine options: Select PostgreSQL (or MySQL, depending on your preference
+5.Templates: Select Free tier or Dev/Test (This prevents AWS from defaulting to massive, expensive instances).
+6.Availability and durability: Ensure Single DB instance is selected. (Selecting Multi-AZ immediately doubles your database cost).
+7.Settings:
+  DB instance identifier: finops-ecommerce-db.
+  Master username: postgres (or admin).
+  Master password: Create a secure password and save it somewhere safe.
+8.Instance configuration: Select Burstable classes (includes t classes) and choose db.t4g.micro (ARM-based, highly cost-efficient for baseline workloads).
+9.Storage: 
+  Storage type: General Purpose SSD (gp3) (gp3 is cheaper and faster than the older gp2).
+  Allocated storage: 20 GB.
+  Uncheck : Enable storage autoscaling
+
+10.Connectivity:
+   Virtual private cloud (VPC): Select your finops-project VPC.
+   DB Subnet group: Select the finops-db-subnet-group you just created.
+   Public access: Select No.
+   VPC security group (firewall): Select Create new, name it finops-db-sg
+11.Scroll to the very bottom. Review the "Estimated Monthly costs" (it should be very low, potentially free if you are within the 12-month Free Tier).
+12.Click create database
+
+____________________________________________________________________________
+
+
+Phase 3 -The compute Core 
+
+Step 1: Create the Security Groups (The firewall)
+
+Before we launch instances, we need to establish the traffic rules. The ALB should accept traffic from the internet, but the EC2 instances should only accept traffic from the ALB.
+
+1.Go to the EC2 Dashboard, scroll down to Network & Security, and click Security Groups.
+
+2.Create the ALB Security group : 
+  Name : finops-alb-sg
+--VPC: finops-project
+--Inbound Rules: Add HTTP (port 80) and HTTPS (port 443), with the Source set to 0.0.0.0/0 (Anywhere IPv4).
+--Click Create security group.
+
+3.Create Security Group
+
+--Name: finops-app-sg
+--Description: Allow traffic only from ALB
+--Inbound Rules: Add HTTP (port 80) (or your specific app port like 8080 or 3000). For the Source, click the search bar and select the finops-alb-sg you just created.
+--Click Create security group.
+
+
+Step 2: Create the finops Lauch template 
+
+1.On the EC2 Dashboard, under Instances, click Launch Templates.
+2.Click Create launch template.
+3.Template name: finops-web-template. Check the box for "Provide guidance...".
+4.Application and OS Images: Select Amazon Linux 2023 AMI, and ensure the architecture is set to 64-bit (Arm)
+5.Instance type: Select t4g.small (Graviton2, highly cost-effective).
+f
+6.Key pair: Select your existing key pair.
+7.Network settings:
+  Do not select a subnet here (the ASG handles that).
+  Security groups: Select the finops-app-sg.
+8.Advanced details: Scroll to the bottom to the User data field. Paste the following script to automatically install a lightweight Nginx web server so we can test the load balancer later:
+
+#!/bin/bash
+sudo dnf update -y
+sudo dnf install nginx -y
+sudo systemctl enable nginx
+sudo systemctl start nginx
+echo "<h1>FinOps E-Commerce App running on $(hostname -f)</h1>" | sudo tee /usr/share/nginx/html/index.html
+
+9.Click Create launch template 
+
+Step 3: Create the target group and laod balancer
+
+The Load Balancer receives traffic and forwards it to the Target Group (which acts as a logical container for our EC2 instances).
+
+
+1.On the EC2 Dashboard left menu, under Load Balancing, click Target Groups.2.Click Create target group.
+3.Choose a target type: Select Instances.
+4.Target group name: finops-web-sg
+5.Protocol/Port: HTTP / 80.
+6.VPC: finops-project.
+7.Health checks: Leave as default (HTTP /). AWS will ping this path to ensure the instance is alive.
+8.Click Next, skip registering targets (the ASG will do this automatically), and click Create target group.
+9.Now, under Load Balancing on the left menu, click Load Balancers.
+10.Click Create load balancer, then select Create under Application Load Balancer.
+11.Name: finops-alb.
+12.Scheme: Internet-facing.
+13.Network mapping:
+    VPC: finops-project.
+    Mappings: Select your two availability zones, and choose the Public subnets (finops-project-public-us-east-1a and 1b).
+14.Security groups: Remove the default, and select finops-alb-sg.
+15.Listeners and routing: For the HTTP:80 listener, select your finops-web-tg Target Group.
+16.Click Create load balancer.
+
+Step 4: Create a finops autoscaling groups
+
+This is where we implement the Mixed Instances Policy Desired capacity: 2
+
+Minimum capacity: 2
+
+Maximum capacity: 6 (This prevents runaway costs if traffic spikes uncontrollably).
+
+Scaling policies: Select Target tracking scaling policy.
+
+Metric type: Average CPU utilization.
+
+Target value: 60 (The ASG will automatically add instances if the average CPU exceeds 60%).
+
+Click Next until you reach the Review screen.
+
+Wait, go back to step 1 (Instance requirements): Click Edit next to Instance requirements. AWS has updated the UI. We need to ensure we set the Allocation strategy.
+
+Alternative UI path (if you see Instance purchase options): Go back to the Choose instance launch options step. Look for Instance purchase options. Select Combine purchase options and instance types.
+
+On-Demand Base: Set to 1. (This guarantees at least one reliable server is always running).
+
+On-Demand percentage above base: Set to 20%. (This means for every 10 instances launched during a spike, 2 are On-Demand, and 8 are highly discounted Spot Instances).
+
+Proceed to review and click Create Auto Scaling group.to slash compute costs.
+
+1.On the EC2 Dashboard left menu, under Auto Scaling, click Auto Scaling Groups.
+2.Click Create Auto Scaling group.
+3.Name: finops-app-asg.
+4.Launch template: Select finops-web-template. Click Next.
+5.VPC: finops-project.
+6.Availability Zones and subnets: Select your two Private subnets (finops-project-private-us-east-1a and 1b). Click Next.
+7.Load balancing: Select Attach to an existing load balancer, choose Choose from your load balancer target groups, and select finops-web-tg. Click Next.
+8.Group size and scaling policies:
+
+Desired capacity: 2
+0
+Minimum capacity: 2
+
+Maximum capacity: 6 (This prevents runaway costs if traffic spikes uncontrollably).
+
+Scaling policies: Select Target tracking scaling policy.
+
+Metric type: Average CPU utilization.
+
+Target value: 60 (The ASG will automatically add instances if the average CPU exceeds 60%).
+
+Click Next until you reach the Review screen.
+
+Wait, go back to step 1 (Instance requirements): Click Edit next to Instance requirements. AWS has updated the UI. We need to ensure we set the allocation stategy 
+
+On-Demand Base: Set to 1. (This guarantees at least one reliable server is always running).
+
+On-Demand percentage above base: Set to 20%. (This means for every 10 instances launched during a spike, 2 are On-Demand, and 8 are highly discounted Spot Instances).
+
+Proceed to review and click Create Auto Scaling group.
+
+____________________________________________________________________________
+
+Phase 4: The  DR setup 
+
+Part 1: S3 cross region replication (CRR)
+
+To copy your data automatically, AWS requires a destination bucket in a different region, and both the source and destination buckets must have Versioning enabled.
+
+Step 1.1: Create the DR Bucket
+
+1.Navigate to the S3 console.
+2.Click Create bucket.
+3.AWS Region: Select your secondary region (e.g., Oregon - us-west-2).
+4.Bucket Versioning: Select Enable. (Crucial: Replication will not work without this).
+5.Leave everything else as default and click Create bucket.
+
+Step 1.2:  Enable Versioning on the Primary Bucket
+
+1.Click on your primary bucket created in Phase 2 (e.g., finops-ecommerce-assets-yourinitials in us-east-1).
+2.Go to the Properties tab.
+3.Under Bucket Versioning, click Edit, select Enable, and click Save changes.
+
+Step 1.3: Create the Replication Rule 
+
+1.Still inside your primary bucket, click the Management tab.
+2.Scroll down to Replication rules and click Create replication rule.
+3.Replication rule name: DR-Copy-To-West.
+4.Status: Keep it Enabled.
+5.Choose a rule scope: Select Apply to all objects in the bucket.
+6.Destination: Select Specify a bucket in another AWS Region. Enter the name of your DR bucket (finops-ecommerce-dr-assets-yourinitials).
+7.IAM role: Select Create new role. AWS will automatically generate the permissions needed for S3 to read from the primary bucket and write to the DR bucket.
+8.Click Save. (When asked if you want to replicate existing objects, choose No, do not replicate existing objects for this exercise to keep it simple, as it requires a batch operations job).
+
+
+Part 2: Automated RDS snapshots with AWS backup
+
+Writing custom Lambda scripts for database backups is tedious. AWS Backup is a centralized service that fully automates this, including the cross-region copying.
+
+
+step 2.1: Create the Backup Plan
+
+1.:Navigate to the AWS Backup service using the top search bar.
+2.On the left menu, click Backup plans, then click Create backup plan.
+3.Select Build a new plan.
+4.Backup plan name: FinOps-Pilot-Light-DR.
+
+Step 2.2: Configure the backup Rule
+
+1.Scroll down to Backup rule configuration
+2.Rule name: Daily-Cross-Region-Backup.
+3.Backup vault: Select Default (or create a new one).
+4.Backup frequency: Select Daily.
+5.Backup window: Select Use default backup window (runs overnight to minimize database performance impact).
+6.Lifecycle: Set Transition to cold storage to Never, and Expire to 7 days. (As part of a FinOps strategy, we must aggressively expire old snapshots so they don't become costly "zombie resources" sitting unattached in our account).
+7.Copy to destination: * Destination Region: Select your DR region (e.g., US West (Oregon)).
+
+
+--Destination Backup vault: Click Create new backup vault, name it DR-Vault, and click Create.
+--Expand Advanced settings under the copy section. Set the copied snapshot to also Expire after 7 days.
+
+8.Create the plan 
+
+Step 2.3: Assign the Database to the Plan
+
+1.You will immediately be prompted to Assign resources.
+2.Resource assignment name: CloudBite-DB-Assignment.
+3.IAM role: Select Default role.
+4.Assign by: Select Resource ID.
+5.Resource type: Select RDS.
+6.Database: Select your finops-ecommerce-db.
+7.Click Assign resources.
+
+Project Complete!
 
 
 
